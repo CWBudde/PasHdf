@@ -450,7 +450,7 @@ type
 implementation
 
 uses
-  Math;
+  Math, ZLib;
 
 { TStreamHelper }
 
@@ -890,20 +890,14 @@ var
   Signature: THdfSignature;
   NodeType, NodeLevel: Byte;
   EntriesUsed: Word;
-  CheckSum: Integer;
   Key, AddressLeftSibling, AddressRightSibling: Int64;
   ElementIndex, DimensionIndex, Elements: Integer;
-  ChunkSize, FilterMask: Cardinal;
+  ElementSize, ChunkSize, FilterMask: Cardinal;
   Start: array of Cardinal;
   BreakCondition: Cardinal;
   ChildPointer, StreamPos: Int64;
-
-  i, j, err, olen: Integer;
-  x, y, z, b, e, dy, dz, sx, sy, sz, dzy, szy: Integer;
-  input, output: Pointer;
-  //start[4],
-
-  buf: array [0..3] of Byte;
+  DecompressionStream: TDecompressionStream;
+  CheckSum: Integer;
 begin
   if DataObject.DataSpace.Dimensionality > 3 then
     raise EHdfInvalidFormat.Create('Error reading dimensions');
@@ -924,16 +918,7 @@ begin
   for DimensionIndex := 0 to FDataObject.DataSpace.Dimensionality - 1 do
     Elements := Elements * FDataObject.DatalayoutChunk[DimensionIndex];
 
-(*
-  dy := FDataObject.DatalayoutChunk[1];
-  dz := FDataObject.DatalayoutChunk[2];
-  sx := FDataObject.DataSpace.Dimension[0];
-  sy := FDataObject.DataSpace.Dimension[1];
-  sz := FDataObject.DataSpace.Dimension[2];
-  dzy := dz * dy;
-  szy := sz * sy;
-  Size := FDataObject.DatalayoutChunk[FDataObject.DataSpace.Dimensionality];
-*)
+  ElementSize := FDataObject.DatalayoutChunk[FDataObject.DataSpace.Dimensionality];
 
   for ElementIndex := 0 to 2 * EntriesUsed - 1 do
   begin
@@ -960,6 +945,13 @@ begin
       StreamPos := Stream.Position;
       Stream.Position := ChildPointer;
 
+      DecompressionStream := TDecompressionStream.Create(Stream);
+      try
+        Assert(DataObject.Data.Size = 0);
+        DataObject.Data.CopyFrom(DecompressionStream, Elements * ElementSize);
+      finally
+        DecompressionStream.Free;
+      end;
       Stream.Position := StreamPos;
     end;
   end;
