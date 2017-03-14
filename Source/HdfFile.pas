@@ -2,10 +2,14 @@ unit HdfFile;
 
 interface
 
+{-$DEFINE IgnoreWrongPosition}
+
 uses
   Classes, SysUtils, Contnrs;
 
 type
+  EHdfInvalidFormat = class(Exception);
+
   TStreamHelper = class helper for TStream
     procedure ReadExcept(var Buffer; Count: Longint; ExceptionMessage: string);
   end;
@@ -59,8 +63,12 @@ type
     FType: Byte;
     FDimensionSize: array of Int64;
     FDimensionMaxSize: array of Int64;
+    function GetDimension(Index: Integer): Integer;
   public
     procedure LoadFromStream(Stream: TStream); override;
+
+    property Dimensionality: Byte read FDimensionality;
+    property Dimension[Index: Integer]: Integer read GetDimension;
   end;
 
   THdfMessageLinkInfo = class(THdfDataObjectMessage)
@@ -82,7 +90,7 @@ type
   private
     FDataTypeMessage: THdfMessageDataType;
   public
-    constructor Create(DatatypeMessage: THdfMessageDataType);
+    constructor Create(DatatypeMessage: THdfMessageDataType); virtual;
 
     procedure LoadFromStream(Stream: TStream); virtual;
     procedure SaveToStream(Stream: TStream);
@@ -128,31 +136,48 @@ type
 
   THdfDataTypeOpaque = class(THdfBaseDataType);
 
-  THdfDataTypeCompound = class(THdfBaseDataType)
+  THdfDataTypeCompoundPart = class
   private
     FName: UTF8String;
     FByteOffset: Int64;
+    FSize: Int64;
+    FDataType: THdfMessageDataType;
   public
+    constructor Create(DatatypeMessage: THdfMessageDataType); virtual;
+
+    procedure ReadFromStream(Stream: TStream);
+  end;
+
+  THdfDataTypeCompound = class(THdfBaseDataType)
+  private
+    FDataTypes: TObjectList;
+  public
+    constructor Create(DatatypeMessage: THdfMessageDataType); virtual;
     procedure LoadFromStream(Stream: TStream); override;
   end;
 
   THdfDataTypeReference = class(THdfBaseDataType);
   THdfDataTypeEnumerated = class(THdfBaseDataType);
   THdfDataTypeVariableLength = class(THdfBaseDataType)
-
+  private
+    FDataType: THdfMessageDataType;
   public
+    constructor Create(DatatypeMessage: THdfMessageDataType); override;
     procedure LoadFromStream(Stream: TStream); override;
   end;
   THdfDataTypeArray = class(THdfBaseDataType);
 
   THdfMessageDataType = class(THdfDataObjectMessage)
   private
-    FClass: Byte;
+    FDataClass: Byte;
     FClassBitField: array [0..2] of Byte;
     FSize: Integer;
     FDataType: THdfBaseDataType;
   public
     procedure LoadFromStream(Stream: TStream); override;
+
+    property Size: Integer read FSize;
+    property DataClass: Byte read FDataClass;
   end;
 
   THdfMessageDataFill = class(THdfDataObjectMessage)
@@ -169,6 +194,7 @@ type
     FDataAddress: Int64;
     FDataSize: Int64;
     FDimensionality: Byte;
+    procedure ReadTree(Stream: TStream; Size: Integer);
   public
     procedure LoadFromStream(Stream: TStream); override;
   end;
@@ -184,7 +210,25 @@ type
     procedure LoadFromStream(Stream: TStream); override;
   end;
 
-  THdfMessageFilterPipeline = class(THdfDataObjectMessage);
+  THdfMessageFilterPipeline = class(THdfDataObjectMessage)
+  private
+    FFilters: Byte;
+  public
+    procedure LoadFromStream(Stream: TStream); override;
+  end;
+
+  THdfAttribute = class
+  private
+    FName: UTF8String;
+    FStream: TMemoryStream;
+    function GetValueAsString: UTF8String;
+    procedure SetValueAsString(const Value: UTF8String);
+  public
+    constructor Create(Name: UTF8String);
+
+    property Name: UTF8String read FName;
+    property ValueAsString: UTF8String read GetValueAsString write SetValueAsString;
+  end;
 
   THdfMessageAttribute = class(THdfDataObjectMessage)
   private
@@ -194,10 +238,11 @@ type
     FDataspaceSize: Word;
     FEncoding: Byte;
     FName: UTF8String;
-    procedure ReadData(DatatypeMessage: THdfMessageDataType;
-      DataspaceMessage: THdfMessageDataSpace);
-    procedure ReadDataDimension(DatatypeMessage: THdfMessageDataType;
-      DataspaceMessage: THdfMessageDataSpace; Dimension: Integer);
+    FDatatypeMessage: THdfMessageDataType;
+    FDataspaceMessage: THdfMessageDataSpace;
+    procedure ReadData(Stream: TStream; Attribute: THdfAttribute);
+    procedure ReadDataDimension(Stream: TStream; Attribute: THdfAttribute;
+      Dimension: Integer);
   public
     procedure LoadFromStream(Stream: TStream); override;
   end;
@@ -226,6 +271,7 @@ type
   THdfFractalHeap = class(TInterfacedPersistent, IStreamPersist)
   private
     FSuperBlock: THdfSuperBlock;
+    FDataObject: THdfDataObject;
     FSignature: THdfSignature;
     FVersion: Byte;
     FHeapIdLength: Word;
@@ -258,7 +304,7 @@ type
   protected
     property SuperBlock: THdfSuperBlock read FSuperBlock;
   public
-    constructor Create(SuperBlock: THdfSuperBlock);
+    constructor Create(SuperBlock: THdfSuperBlock; DataObject: THdfDataObject);
 
     procedure LoadFromStream(Stream: TStream);
     procedure SaveToStream(Stream: TStream);
@@ -276,6 +322,7 @@ type
   private
     FSuperBlock: THdfSuperBlock;
     FFractalHeap: THdfFractalHeap;
+    FDataObject: THdfDataObject;
     FSignature: THdfSignature;
     FVersion: Byte;
     FHeapHeaderAddress: Int64;
@@ -286,25 +333,17 @@ type
 
     property SuperBlock: THdfSuperBlock read FSuperBlock;
   public
-    constructor Create(SuperBlock: THdfSuperBlock; FractalHeap: THdfFractalHeap); virtual;
+    constructor Create(SuperBlock: THdfSuperBlock;
+      FractalHeap: THdfFractalHeap; DataObject: THdfDataObject); virtual;
 
     procedure LoadFromStream(Stream: TStream); virtual;
     procedure SaveToStream(Stream: TStream);
   end;
 
-  THdfNameValuePair = class
-    Name: UTF8String;
-    Value: UTF8String;
-  end;
-
   THdfDirectBlock = class(THdfCustomBlock)
-  private
-    FNameValueList: TObjectList;
   protected
     class function GetSignature: THdfSignature; override;
   public
-    procedure AfterConstruction; override;
-  
     procedure LoadFromStream(Stream: TStream); override;
   end;
 
@@ -315,10 +354,13 @@ type
   protected
     class function GetSignature: THdfSignature; override;
   public
-    constructor Create(SuperBlock: THdfSuperBlock; FractalHeap: THdfFractalHeap); override;
+    constructor Create(SuperBlock: THdfSuperBlock; FractalHeap: THdfFractalHeap;
+      DataObject: THdfDataObject); override;
 
     procedure LoadFromStream(Stream: TStream); override;
   end;
+
+  TArrayOfInteger = array of Integer;
 
   THdfDataObject = class(TInterfacedPersistent, IStreamPersist)
   private
@@ -335,31 +377,63 @@ type
     FMaximumCompact: Word;
     FMinimumDense: Word;
 
+    FDataLayoutChunk: TArrayOfInteger;
+
+    FData: TMemoryStream;
+    FAttributeList: TObjectList;
+
+    FDataType: THdfMessageDataType;
+    FDataSpace: THdfMessageDataSpace;
     FLinkInfo: THdfMessageLinkInfo;
     FGroupInfo: THdfMessageGroupInfo;
     FAttributeInfo: THdfMessageAttributeInfo;
+
+    FDataObjects: TObjectList;
+
+    FAttributesHeap: THdfFractalHeap;
+    FObjectsHeap: THdfFractalHeap;
+    function GetDataObjectCount: Integer;
+    function GetDataObject(Index: Integer): THdfDataObject;
+    function GetDataLayoutChunk(Index: Integer): Integer;
+    function GetDataLayoutChunkCount: Integer;
+    function GetAttributeListCount: Integer;
+    function GetAttributeListItem(Index: Integer): THdfAttribute;
   protected
     procedure ReadObjectHeaderMessages(Stream: TStream; EndOfStream: Int64);
 
     property Superblock: THdfSuperBlock read FSuperBlock;
+    property AttributesHeap: THdfFractalHeap read FAttributesHeap;
+    property ObjectsHeap: THdfFractalHeap read FObjectsHeap;
   public
     constructor Create(SuperBlock: THdfSuperBlock); overload;
     constructor Create(SuperBlock: THdfSuperBlock; Name: UTF8String); overload;
 
+    procedure AddDataObject(DataObject: THdfDataObject);
+    procedure AddAttribute(Attribute: THdfAttribute);
+
     procedure LoadFromStream(Stream: TStream);
     procedure SaveToStream(Stream: TStream);
 
+    property Name: UTF8String read FName;
+    property Data: TMemoryStream read FData;
+    property DataType: THdfMessageDataType read FDataType;
+    property DataSpace: THdfMessageDataSpace read FDataSpace;
     property LinkInfo: THdfMessageLinkInfo read FLinkInfo;
     property GroupInfo: THdfMessageGroupInfo read FGroupInfo;
     property AttributeInfo: THdfMessageAttributeInfo read FAttributeInfo;
+
+    property AttributeListCount: Integer read GetAttributeListCount;
+    property AttributeListItem[Index: Integer]: THdfAttribute read GetAttributeListItem;
+    property DataObjectCount: Integer read GetDataObjectCount;
+    property DataObject[Index: Integer]: THdfDataObject read GetDataObject;
+    property DataLayoutChunkCount: Integer read GetDataLayoutChunkCount;
+    property DataLayoutChunk[Index: Integer]: Integer read GetDataLayoutChunk;
   end;
 
   THdfFile = class(TInterfacedPersistent, IStreamPersist)
   private
     FSuperBlock: THdfSuperBlock;
     FDataObject: THdfDataObject;
-    FAttributesHeap: THdfFractalHeap;
-    FObjectsHeap: THdfFractalHeap;
   public
     procedure AfterConstruction; override;
 
@@ -368,6 +442,9 @@ type
 
     procedure LoadFromFile(Filename: TFileName);
     procedure SaveToFile(Filename: TFileName);
+
+    property SuperBlock: THdfSuperBlock read FSuperBlock;
+    property DataObject: THdfDataObject read FDataObject;
   end;
 
 implementation
@@ -498,6 +575,14 @@ begin
   end;
 end;
 
+function THdfMessageDataSpace.GetDimension(Index: Integer): Integer;
+begin
+  if (Index < 0) or (Index >= Length(FDimensionSize)) then
+    raise Exception.CreateFmt('Index out of bounds (%d)', [Index]);
+
+  Result := FDimensionSize[Index];
+end;
+
 
 { THdfBaseDataType }
 
@@ -589,16 +674,50 @@ begin
 end;
 
 
+{ THdfDataTypeCompoundPart }
+
+constructor THdfDataTypeCompoundPart.Create(DatatypeMessage: THdfMessageDataType);
+begin
+  FDataType := THdfMessageDataType.Create(DatatypeMessage.Superblock, DatatypeMessage.DataObject);
+  FSize := DatatypeMessage.Size;
+end;
+
+procedure THdfDataTypeCompoundPart.ReadFromStream(Stream: TStream);
+var
+  Char: AnsiChar;
+  ByteIndex: Integer;
+  Temp: Byte;
+begin
+  FName := '';
+  repeat
+    Stream.ReadExcept(Char, 1, 'Error reading char');
+    FName := FName + Char;
+  until Char = #0;
+
+  ByteIndex := 0;
+  repeat
+    Stream.ReadExcept(Temp, 1, 'Error reading value');
+    FByteOffset := FByteOffset + Temp shl (8 * ByteIndex);
+    Inc(ByteIndex);
+  until 1 shl (8 * ByteIndex) > FSize;
+
+  FDataType.LoadFromStream(Stream);
+end;
+
 { THdfDataTypeCompound }
+
+constructor THdfDataTypeCompound.Create(DatatypeMessage: THdfMessageDataType);
+begin
+  inherited Create(DatatypeMessage);
+
+  FDataTypes := TObjectList.Create;
+end;
 
 procedure THdfDataTypeCompound.LoadFromStream(Stream: TStream);
 var
   Index: Integer;
   Count: Integer;
-  Char: AnsiChar;
-  ByteIndex: Integer;
-  Temp: Byte;
-  DataType: THdfMessageDataType;
+  Part: THdfDataTypeCompoundPart;
 begin
   if (FDataTypeMessage.Version <> 3) then
     raise Exception.CreateFmt('Error unsupported compound version (%d)', [FDataTypeMessage.Version]);
@@ -606,33 +725,26 @@ begin
   Count := FDataTypeMessage.FClassBitField[1] shl 8 + FDataTypeMessage.FClassBitField[0];
   for Index := 0 to Count - 1 do
   begin
-    FName := '';
-    repeat
-      Stream.ReadExcept(Char, 1, 'Error reading char');
-      FName := FName + Char;
-    until Char = #0;
-
-    ByteIndex := 0;
-    repeat
-      Stream.ReadExcept(Temp, 1, 'Error reading value');
-      FByteOffset := FByteOffset + Temp shl (8 * ByteIndex);
-      Inc(ByteIndex);
-    until 1 shl (8 * ByteIndex) > FDataTypeMessage.FSize;
-
-    DataType := THdfMessageDataType.Create(FDataTypeMessage.Superblock, FDataTypeMessage.DataObject);
-    DataType.LoadFromStream(Stream);
+    Part := THdfDataTypeCompoundPart.Create(FDataTypeMessage);
+    Part.ReadFromStream(Stream);
+    FDataTypes.Add(Part);
   end;
 end;
 
 
 { THdfDataTypeVariableLength }
 
-procedure THdfDataTypeVariableLength.LoadFromStream(Stream: TStream);
-var
-  DataType: THdfMessageDataType;
+constructor THdfDataTypeVariableLength.Create(
+  DatatypeMessage: THdfMessageDataType);
 begin
-  DataType := THdfMessageDataType.Create(FDataTypeMessage.Superblock, FDataTypeMessage.DataObject);
-  DataType.LoadFromStream(Stream);
+  inherited;
+
+  FDataType := THdfMessageDataType.Create(FDataTypeMessage.Superblock, FDataTypeMessage.DataObject);
+end;
+
+procedure THdfDataTypeVariableLength.LoadFromStream(Stream: TStream);
+begin
+  FDataType.LoadFromStream(Stream);
 end;
 
 
@@ -643,7 +755,7 @@ begin
   inherited;
 
   // expand class and version
-  FClass := FVersion and $F;
+  FDataClass := FVersion and $F;
   FVersion := FVersion shr 4;
 
   // check version
@@ -654,7 +766,7 @@ begin
 
   Stream.ReadExcept(FSize, 4, 'Error reading size');
 
-  case FClass of
+  case FDataClass of
     0:
       FDataType := THdfDataTypeFixedPoint.Create(Self);
     1:
@@ -678,7 +790,7 @@ begin
     10:
       FDataType := THdfDataTypeArray.Create(Self);
     else
-      raise Exception.CreateFmt('Unknown datatype (%d)', [FClass]);
+      raise Exception.CreateFmt('Unknown datatype (%d)', [FDataClass]);
   end;
 
   if Assigned(FDataType) then
@@ -710,6 +822,11 @@ end;
 { THdfMessageDataLayout }
 
 procedure THdfMessageDataLayout.LoadFromStream(Stream: TStream);
+var
+  Index: Integer;
+  Temp: Integer;
+  StreamPos: Int64;
+  Size: Int64;
 begin
   inherited;
 
@@ -719,27 +836,135 @@ begin
 
   Stream.ReadExcept(FLayoutClass, 1, 'Error reading layout class');
   case FLayoutClass of
-    0:
+    0: // compact storage
       begin
+        // read data size
         Stream.ReadExcept(FDataSize, 2, 'Error reading data size');
 
-        // TODO
+        // read raw data
+        DataObject.Data.CopyFrom(Stream, FDataSize);
       end;
-    1:
+    1: // continous storage
       begin
+        // compact storage
         Stream.ReadExcept(FDataAddress, Superblock.OffsetSize, 'Error reading data address');
         Stream.ReadExcept(FDataSize, Superblock.LengthsSize, 'Error reading data lengths');
 
-        // TODO ?
+        if FDataAddress > 0 then
+        begin
+          StreamPos := Stream.Position;
+          Stream.Position := FDataAddress;
+
+          DataObject.Data.CopyFrom(Stream, FDataSize);
+
+          Stream.Position := StreamPos;
+        end;
       end;
     2:
       begin
         Stream.ReadExcept(FDimensionality, 1, 'Error reading dimensionality');
         Stream.ReadExcept(FDataAddress, Superblock.OffsetSize, 'Error reading data address');
+        SetLength(FDataObject.FDataLayoutChunk, FDimensionality);
+        for Index := 0 to FDimensionality - 1 do
+          Stream.ReadExcept(FDataObject.FDataLayoutChunk[Index], 4, 'Error reading data layout chunk');
 
-        // TODO
+        Size := DataObject.FDataLayoutChunk[FDimensionality - 1];
+        for Index := 0 to DataObject.DataSpace.Dimensionality - 1 do
+          Size := Size * DataObject.DataSpace.FDimensionSize[Index];
+
+        if (FDataAddress > 0) and (FDataAddress < Superblock.EndOfFileAddress) then
+        begin
+          StreamPos := Stream.Position;
+          Stream.Position := FDataAddress;
+
+          ReadTree(Stream, Size);
+
+          Stream.Position := StreamPos;
+        end;
       end;
   end;
+end;
+
+procedure THdfMessageDataLayout.ReadTree(Stream: TStream; Size: Integer);
+var
+  Signature: THdfSignature;
+  NodeType, NodeLevel: Byte;
+  EntriesUsed: Word;
+  CheckSum: Integer;
+  Key, AddressLeftSibling, AddressRightSibling: Int64;
+  ElementIndex, DimensionIndex, Elements: Integer;
+  ChunkSize, FilterMask: Cardinal;
+  Start: array of Cardinal;
+  BreakCondition: Cardinal;
+  ChildPointer, StreamPos: Int64;
+
+  i, j, err, olen: Integer;
+  x, y, z, b, e, dy, dz, sx, sy, sz, dzy, szy: Integer;
+  input, output: Pointer;
+  //start[4],
+
+  buf: array [0..3] of Byte;
+begin
+  if DataObject.DataSpace.Dimensionality > 3 then
+    raise EHdfInvalidFormat.Create('Error reading dimensions');
+
+  // read signature
+  Stream.ReadExcept(Signature[0], 4, 'Error reading signature');
+  if Signature <> 'TREE' then
+    raise Exception.CreateFmt('Wrong signature (%s)', [string(Signature)]);
+
+  Stream.ReadExcept(NodeType, 1, 'Error reading node type');
+  Stream.ReadExcept(NodeLevel, 1, 'Error reading node level');
+
+  Stream.ReadExcept(EntriesUsed, 2, 'Error reading entries used');
+  Stream.ReadExcept(AddressLeftSibling, Superblock.OffsetSize, 'Error reading left sibling address');
+  Stream.ReadExcept(AddressRightSibling, Superblock.OffsetSize, 'Error reading right sibling address');
+
+  Elements := 1;
+  for DimensionIndex := 0 to FDataObject.DataSpace.Dimensionality - 1 do
+    Elements := Elements * FDataObject.DatalayoutChunk[DimensionIndex];
+
+(*
+  dy := FDataObject.DatalayoutChunk[1];
+  dz := FDataObject.DatalayoutChunk[2];
+  sx := FDataObject.DataSpace.Dimension[0];
+  sy := FDataObject.DataSpace.Dimension[1];
+  sz := FDataObject.DataSpace.Dimension[2];
+  dzy := dz * dy;
+  szy := sz * sy;
+  Size := FDataObject.DatalayoutChunk[FDataObject.DataSpace.Dimensionality];
+*)
+
+  for ElementIndex := 0 to 2 * EntriesUsed - 1 do
+  begin
+    if NodeType = 0 then
+      Stream.ReadExcept(Key, Superblock.LengthsSize, 'Error reading keys')
+    else
+    begin
+      Stream.ReadExcept(ChunkSize, 4, 'Error reading chunk size');
+      Stream.ReadExcept(FilterMask, 4, 'Error reading filter mask');
+      if FilterMask <> 0 then
+        raise Exception.Create('All filters must be enabled');
+
+      SetLength(Start, DataObject.DataSpace.Dimensionality);
+      for DimensionIndex := 0 to DataObject.DataSpace.Dimensionality - 1 do
+        Stream.ReadExcept(Start[DimensionIndex], 8, 'Error reading start');
+
+      Stream.ReadExcept(BreakCondition, 8, 'Error reading break condition');
+      if BreakCondition <> 0 then
+        Break;
+
+      Stream.ReadExcept(ChildPointer, Superblock.OffsetSize, 'Error reading child pointer');
+
+      // read data
+      StreamPos := Stream.Position;
+      Stream.Position := ChildPointer;
+
+      Stream.Position := StreamPos;
+    end;
+  end;
+
+  Stream.ReadExcept(CheckSum, 4, 'Error reading checksum');
 end;
 
 
@@ -797,33 +1022,138 @@ begin
 end;
 
 
-{ THdfMessageAttribute }
+{ THdfMessageFilterPipeline }
 
-procedure THdfMessageAttribute.ReadData(DatatypeMessage: THdfMessageDataType;
-  DataspaceMessage: THdfMessageDataSpace);
+procedure THdfMessageFilterPipeline.LoadFromStream(Stream: TStream);
+var
+  Index: Integer;
+  FilterIdentificationValue: Word;
+  Flags, NumberClientDataValues: Word;
+  ValueIndex: Integer;
+  ClientData: Integer;
 begin
-  // TODO
+  inherited;
+
+  // check version
+  if FVersion <> 2 then
+    raise Exception.Create('Unsupported version of the filter pipeline message');
+
+  Stream.ReadExcept(FFilters, 1, 'Error reading filters');
+  if FFilters > 32 then
+    raise Exception.Create('filter pipeline message has too many filters');
+
+  for Index := 0 to FFilters - 1 do
+  begin
+    Stream.ReadExcept(FilterIdentificationValue, 2, 'Error reading filter identification value');
+    if not FilterIdentificationValue in [1, 2] then
+      raise Exception.Create('Unsupported filter');
+    Stream.ReadExcept(Flags, 2, 'Error reading flags');
+    Stream.ReadExcept(NumberClientDataValues, 2, 'Error reading number client data values');
+    for ValueIndex := 0 to NumberClientDataValues - 1 do
+      Stream.ReadExcept(ClientData, 4, 'Error reading client data');
+  end;
 end;
 
-procedure THdfMessageAttribute.ReadDataDimension(DatatypeMessage: THdfMessageDataType;
-  DataspaceMessage: THdfMessageDataSpace; Dimension: Integer);
+
+{ THdfAttribute }
+
+constructor THdfAttribute.Create(Name: UTF8String);
+begin
+  FName := Name;
+  FStream := TMemoryStream.Create;
+end;
+
+function THdfAttribute.GetValueAsString: UTF8String;
+var
+  StringStream: TStringStream;
+begin
+  if FStream.Size = 0 then
+  begin
+    Result := '';
+    Exit;
+  end;
+
+  StringStream := TStringStream.Create;
+  try
+    FStream.Position := 0;
+    StringStream.CopyFrom(FStream, FStream.Size);
+    Result := StringStream.DataString;
+  finally
+    StringStream.Free;
+  end;
+end;
+
+procedure THdfAttribute.SetValueAsString(const Value: UTF8String);
+var
+  StringStream: TStringStream;
+begin
+  StringStream := TStringStream.Create(string(Value));
+  try
+    FStream.Clear;
+    FStream.CopyFrom(StringStream, StringStream.Size);
+  finally
+    StringStream.Free;
+  end;
+end;
+
+{ THdfMessageAttribute }
+
+procedure THdfMessageAttribute.ReadData(Stream: TStream; Attribute: THdfAttribute);
+var
+  Name: UTF8String;
+  Value: Integer;
+  Dimension: Integer;
+  EndAddress: Integer;
+begin
+  case FDatatypeMessage.DataClass of
+    3:
+      begin
+        SetLength(Name, FDatatypeMessage.Size);
+        Stream.ReadExcept(Name[1], FDatatypeMessage.Size, 'Error reading string');
+        Attribute.ValueAsString := Name;
+      end;
+    6:
+      begin
+        // TODO
+        Stream.Seek(FDatatypeMessage.Size, soFromCurrent);
+      end;
+    7:
+      begin
+        Stream.ReadExcept(Value, 4, 'Error reading value');
+        // TODO
+      end;
+    9:
+      begin
+        Stream.ReadExcept(Dimension, 4, 'Error reading dimension');
+        Stream.ReadExcept(EndAddress, 4, 'Error reading end address');
+
+        Stream.ReadExcept(Value, 4, 'Error reading value');
+        Stream.ReadExcept(Value, 4, 'Error reading value');
+        // TODO
+      end;
+    else
+      raise Exception.Create('Error: unknown data class');
+  end;
+end;
+
+procedure THdfMessageAttribute.ReadDataDimension(Stream: TStream;
+  Attribute: THdfAttribute; Dimension: Integer);
 var
   Index: Integer;
 begin
-  if Length(DataspaceMessage.FDimensionSize) > 0 then
-    for Index := 0 to DataspaceMessage.FDimensionSize[0] - 1 do
+  if Length(FDataspaceMessage.FDimensionSize) > 0 then
+    for Index := 0 to FDataspaceMessage.FDimensionSize[0] - 1 do
     begin
-      if (1 < DataspaceMessage.FDimensionality) then
-        ReadDataDimension(DatatypeMessage, DataspaceMessage, Dimension + 1)
+      if (1 < FDataspaceMessage.Dimensionality) then
+        ReadDataDimension(Stream, Attribute, Dimension + 1)
       else
-        ReadData(DatatypeMessage, DataspaceMessage);
+        ReadData(Stream, Attribute);
     end;
 end;
 
 procedure THdfMessageAttribute.LoadFromStream(Stream: TStream);
 var
-  DatatypeMessage: THdfMessageDataType;
-  DataspaceMessage: THdfMessageDataSpace;
+  Attribute: THdfAttribute;
 begin
   inherited;
 
@@ -842,16 +1172,19 @@ begin
   SetLength(FName, FNameSize);
   Stream.ReadExcept(FName[1], FNameSize, 'Error reading name');
 
-  DatatypeMessage := THdfMessageDataType.Create(Superblock, DataObject);
-  DatatypeMessage.LoadFromStream(Stream);
+  FDatatypeMessage := THdfMessageDataType.Create(Superblock, DataObject);
+  FDatatypeMessage.LoadFromStream(Stream);
 
-  DataspaceMessage := THdfMessageDataSpace.Create(Superblock, DataObject);
-  DataspaceMessage.LoadFromStream(Stream);
+  FDataspaceMessage := THdfMessageDataSpace.Create(Superblock, DataObject);
+  FDataspaceMessage.LoadFromStream(Stream);
 
-  if DataspaceMessage.FDimensionality = 0 then
-    ReadData(DatatypeMessage, DataspaceMessage)
+  Attribute := THdfAttribute.Create(FName);
+  DataObject.AddAttribute(Attribute);
+
+  if FDataspaceMessage.Dimensionality = 0 then
+    ReadData(Stream, Attribute)
   else
-    ReadDataDimension(DatatypeMessage, DataspaceMessage, 0);
+    ReadDataDimension(Stream, Attribute, 0);
 end;
 
 { THdfMessageHeaderContinuation }
@@ -905,10 +1238,11 @@ end;
 { THdfCustomBlock }
 
 constructor THdfCustomBlock.Create(SuperBlock: THdfSuperBlock;
-  FractalHeap: THdfFractalHeap);
+  FractalHeap: THdfFractalHeap; DataObject: THdfDataObject);
 begin
   FSuperBlock := SuperBlock;
   FFractalHeap := FractalHeap;
+  FDataObject := DataObject;
 end;
 
 procedure THdfCustomBlock.LoadFromStream(Stream: TStream);
@@ -939,13 +1273,6 @@ end;
 
 { THdfDirectBlock }
 
-procedure THdfDirectBlock.AfterConstruction;
-begin
-  inherited;
-
-  FNameValueList := TObjectList.Create;
-end;
-
 class function THdfDirectBlock.GetSignature: THdfSignature;
 begin
   Result := 'FHDB';
@@ -959,10 +1286,10 @@ var
   OffsetX, LengthX: Int64;
   Temp: Int64;
   Name, Value: AnsiString;
-  NameValuePair: THdfNameValuePair;
+  Attribute: THdfAttribute;
   HeapHeaderAddress: Int64;
   StreamPos: Int64;
-  DataObject: THdfDataObject;
+  SubDataObject: THdfDataObject;
 begin
   inherited;
 
@@ -1015,11 +1342,10 @@ begin
         Value := '';
       end;
 
-      NameValuePair := THdfNameValuePair.Create;
-      NameValuePair.Name := Name;
-      NameValuePair.Value := Value;
+      Attribute := THdfAttribute.Create(Name);
+      Attribute.ValueAsString := Value;
 
-      FNameValueList.Add(NameValuePair);
+      FDataObject.AddAttribute(Attribute);
     end
     else
     if (TypeAndVersion = 1) then
@@ -1039,18 +1365,12 @@ begin
 
       StreamPos := Stream.Position;
       
-(*
-      log("\nfractal head type 1 length %4lX name %s address %lX\n", length, name, heap_header_address);
-
-      dir = malloc(sizeof(struct DIR));
-      dir->next = dataobject->directory;
-      dataobject->directory = dir;
-*)
-
       Stream.Position := HeapHeaderAddress;
 
-      DataObject := THdfDataObject.Create(SuperBlock, Name);
-      DataObject.LoadFromStream(Stream);
+      SubDataObject := THdfDataObject.Create(SuperBlock, Name);
+      SubDataObject.LoadFromStream(Stream);
+
+      FDataObject.AddDataObject(SubDataObject);
 
       Stream.Position := StreamPos;
     end;
@@ -1061,10 +1381,10 @@ end;
 { THdfIndirectBlock }
 
 constructor THdfIndirectBlock.Create(SuperBlock: THdfSuperBlock;
-  FractalHeap: THdfFractalHeap);
+  FractalHeap: THdfFractalHeap; DataObject: THdfDataObject);
 begin
-  FSuperBlock := SuperBlock;
-  FFractalHeap := FractalHeap;
+  inherited Create(SuperBlock, FractalHeap, DataObject);
+
   FInitialBlockSize := FractalHeap.StartingBlockSize;
 end;
 
@@ -1082,8 +1402,7 @@ var
   SizeOfFilteredDirectBlock: Int64;
   FilterMaskForDirectBlock: Integer;
   StreamPosition: Int64;
-  DirectBlock: THdfDirectBlock;
-  IndirectBlock: THdfIndirectBlock;
+  Block: THdfCustomBlock;
 begin
   inherited;
 
@@ -1121,8 +1440,8 @@ begin
       StreamPosition := Stream.Position;
       Stream.Position := ChildBlockAddress;
 
-      DirectBlock := THdfDirectBlock.Create(SuperBlock, FFractalHeap);
-      DirectBlock.LoadFromStream(Stream);
+      Block := THdfDirectBlock.Create(SuperBlock, FFractalHeap, FDataObject);
+      Block.LoadFromStream(Stream);
 
       Stream.Position := StreamPosition;
     end;
@@ -1139,12 +1458,11 @@ begin
       StreamPosition := Stream.Position;
       Stream.Position := ChildBlockAddress;
 
-      IndirectBlock := THdfInDirectBlock.Create(SuperBlock, FFractalHeap);
-      IndirectBlock.LoadFromStream(Stream);
+      Block := THdfInDirectBlock.Create(SuperBlock, FFractalHeap, FDataObject);
+      Block.LoadFromStream(Stream);
 
       Stream.Position := StreamPosition;
     end;
-
     Dec(n);
   end;
 end;
@@ -1152,15 +1470,15 @@ end;
 
 { THdfFractalHeap }
 
-constructor THdfFractalHeap.Create(SuperBlock: THdfSuperBlock);
+constructor THdfFractalHeap.Create(SuperBlock: THdfSuperBlock; DataObject: THdfDataObject);
 begin
   FSuperBlock := SuperBlock;
+  FDataObject := DataObject;
 end;
 
 procedure THdfFractalHeap.LoadFromStream(Stream: TStream);
 var
-  DirectBlock: THdfDirectBlock;
-  InDirectBlock: THdfIndirectBlock;
+  Block: THdfCustomBlock;
 begin
   // read signature
   Stream.ReadExcept(FSignature[0], 4, 'Error reading signature');
@@ -1177,9 +1495,9 @@ begin
   Stream.ReadExcept(FFlags, 1, 'Error reading flags');
 
   Stream.ReadExcept(FMaximumSize, 4, 'Error reading maximum size');
-  Stream.Read(FNextHugeID, SuperBlock.LengthsSize);
-  Stream.Read(FBtreeAddresses, SuperBlock.OffsetSize);
-  Stream.Read(FAmountFreeSpace, SuperBlock.LengthsSize);
+  Stream.ReadExcept(FNextHugeID, SuperBlock.LengthsSize, 'Error reading next huge ID');
+  Stream.ReadExcept(FBtreeAddresses, SuperBlock.OffsetSize, 'Error reading Btree Addresses');
+  Stream.ReadExcept(FAmountFreeSpace, SuperBlock.LengthsSize, 'Error reading amount of free space');
   Stream.Read(FAddressManagedBlock, SuperBlock.OffsetSize);
   Stream.Read(FAmountManagedSpace, SuperBlock.LengthsSize);
   Stream.Read(FAmountAllocatedManagedSpace, SuperBlock.LengthsSize);
@@ -1215,15 +1533,10 @@ begin
     Stream.Position := FAddressOfRootBlock;
 
     if FCurrentNumberOfRows <> 0 then
-    begin
-      InDirectBlock := THdfIndirectBlock.Create(SuperBlock, Self);
-      InDirectBlock.LoadFromStream(Stream);
-    end
+      Block := THdfIndirectBlock.Create(SuperBlock, Self, FDataObject)
     else
-    begin
-      DirectBlock := THdfDirectBlock.Create(SuperBlock, Self);
-      DirectBlock.LoadFromStream(Stream);
-    end;
+      Block := THdfDirectBlock.Create(SuperBlock, Self, FDataObject);
+    Block.LoadFromStream(Stream);
   end;
 end;
 
@@ -1241,15 +1554,74 @@ begin
   FName := '';
 
   // create a few default messages
+  FDataType := THdfMessageDataType.Create(FSuperBlock, Self);
+  FDataSpace := THdfMessageDataSpace.Create(FSuperBlock, Self);
   FLinkInfo := THdfMessageLinkInfo.Create(FSuperBlock, Self);
   FGroupInfo := THdfMessageGroupInfo.Create(FSuperBlock, Self);
   FAttributeInfo := THdfMessageAttributeInfo.Create(FSuperBlock, Self);
+
+  FAttributesHeap := THdfFractalHeap.Create(FSuperBlock, Self);
+  FObjectsHeap := THdfFractalHeap.Create(FSuperBlock, Self);
+
+  FData := TMemoryStream.Create;
+  FAttributeList := TObjectList.Create;
+
+  FDataObjects := TObjectList.Create;
+end;
+
+procedure THdfDataObject.AddAttribute(Attribute: THdfAttribute);
+begin
+  FAttributeList.Add(Attribute);
+end;
+
+procedure THdfDataObject.AddDataObject(DataObject: THdfDataObject);
+begin
+  FDataObjects.Add(DataObject);
 end;
 
 constructor THdfDataObject.Create(SuperBlock: THdfSuperBlock; Name: UTF8String);
 begin
   Create(SuperBlock);
   FName := Name;
+end;
+
+function THdfDataObject.GetAttributeListCount: Integer;
+begin
+  Result := FAttributeList.Count;
+end;
+
+function THdfDataObject.GetAttributeListItem(Index: Integer): THdfAttribute;
+begin
+  if (Index < 0) or (Index >= FAttributeList.Count) then
+    raise Exception.CreateFmt('Index out of bounds (%d)', [Index]);
+
+  Result := THdfAttribute(FAttributeList[Index]);
+end;
+
+function THdfDataObject.GetDataLayoutChunk(Index: Integer): Integer;
+begin
+  if (Index < 0) or (Index >= Length(FDataLayoutChunk)) then
+    raise Exception.CreateFmt('Index out of bounds (%d)', [Index]);
+
+  Result := FDataLayoutChunk[Index];
+end;
+
+function THdfDataObject.GetDataLayoutChunkCount: Integer;
+begin
+  Result := Length(FDataLayoutChunk);
+end;
+
+function THdfDataObject.GetDataObject(Index: Integer): THdfDataObject;
+begin
+  if (Index < 0) or (Index >= FDataObjects.Count) then
+    raise Exception.CreateFmt('Index out of bounds (%d)', [Index]);
+
+  Result := THdfDataObject(FDataObjects[Index]);
+end;
+
+function THdfDataObject.GetDataObjectCount: Integer;
+begin
+  Result := FDataObjects.Count;
 end;
 
 procedure THdfDataObject.LoadFromStream(Stream: TStream);
@@ -1284,6 +1656,22 @@ begin
   Stream.ReadExcept(FChunkSize, 1 shl (FFlags and 3), 'Error reading chunk size');
 
   ReadObjectHeaderMessages(Stream, Stream.Position + FChunkSize);
+
+  // parse message attribute info
+  if (AttributeInfo.FractalHeapAddress > 0) and
+     (AttributeInfo.FractalHeapAddress < FSuperblock.EndOfFileAddress) then
+  begin
+    Stream.Position := AttributeInfo.FractalHeapAddress;
+    FAttributesHeap.LoadFromStream(Stream);
+  end;
+
+  // parse message link info
+  if (LinkInfo.FractalHeapAddress > 0) and
+     (LinkInfo.FractalHeapAddress < FSuperblock.EndOfFileAddress) then
+  begin
+    Stream.Position := LinkInfo.FractalHeapAddress;
+    FObjectsHeap.LoadFromStream(Stream);
+  end;
 end;
 
 procedure THdfDataObject.SaveToStream(Stream: TStream);
@@ -1319,11 +1707,11 @@ begin
       0:
         Stream.Seek(MessageSize, soFromCurrent);
       1:
-        DataObjectMessage := THdfMessageDataSpace.Create(FSuperBlock, Self);
+        DataObjectMessage := FDataSpace;
       2:
         DataObjectMessage := FLinkInfo;
       3:
-        DataObjectMessage := THdfMessageDataType.Create(FSuperBlock, Self);
+        DataObjectMessage := FDataType;
       5:
         DataObjectMessage := THdfMessageDataFill.Create(FSuperBlock, Self);
       8:
@@ -1346,7 +1734,12 @@ begin
     if Assigned(DataObjectMessage) then
       DataObjectMessage.LoadFromStream(Stream);
 
-    Assert(Stream.Position = EndPos);
+    {$IFDEF IgnoreWrongPosition}
+    Stream.Position := EndPos;
+    {$ELSE}
+    if Stream.Position <> EndPos then
+      Assert(Stream.Position = EndPos);
+    {$ENDIF}
   end;
 end;
 
@@ -1359,9 +1752,6 @@ begin
 
   FSuperBlock := THdfSuperBlock.Create;
   FDataObject := THdfDataObject.Create(FSuperblock);
-
-  FAttributesHeap := THdfFractalHeap.Create(FSuperBlock);
-  FObjectsHeap := THdfFractalHeap.Create(FSuperBlock);
 end;
 
 procedure THdfFile.LoadFromFile(Filename: TFileName);
@@ -1381,22 +1771,6 @@ procedure THdfFile.LoadFromStream(Stream: TStream);
 begin
   FSuperblock.LoadFromStream(Stream);
   FDataObject.LoadFromStream(Stream);
-
-  // parse message attribute info
-  if (FDataObject.AttributeInfo.FractalHeapAddress > 0) and
-     (FDataObject.AttributeInfo.FractalHeapAddress < FSuperblock.EndOfFileAddress) then
-  begin
-    Stream.Position := FDataObject.AttributeInfo.FractalHeapAddress;
-    FAttributesHeap.LoadFromStream(Stream);
-  end;
-
-  // parse message link info
-  if (FDataObject.LinkInfo.FractalHeapAddress > 0) and
-     (FDataObject.LinkInfo.FractalHeapAddress < FSuperblock.EndOfFileAddress) then
-  begin
-    Stream.Position := FDataObject.LinkInfo.FractalHeapAddress;
-    FObjectsHeap.LoadFromStream(Stream);
-  end;
 end;
 
 procedure THdfFile.SaveToFile(Filename: TFileName);
