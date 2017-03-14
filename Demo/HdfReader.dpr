@@ -11,7 +11,7 @@ uses
 procedure PrintDataObjectInformation(DataObject: THdfDataObject; Indent: Integer);
 var
   Index: Integer;
-  IndentStr: string;
+  IndentStr, Value: string;
 begin
   IndentStr := DupeString(' ', Indent);
   if Indent > 2 then
@@ -29,7 +29,13 @@ begin
   begin
     WriteLn(IndentStr + 'Attributes: ');
     for Index := 0 to DataObject.AttributeListCount - 1 do
-      WriteLn(IndentStr + '  ' + DataObject.AttributeListItem[Index].Name + ': ' + DataObject.AttributeListItem[Index].ValueAsString);
+    begin
+      Value := DataObject.AttributeListItem[Index].ValueAsString;
+      if Value <> '' then
+        WriteLn(IndentStr + '  ' + DataObject.AttributeListItem[Index].Name + ': ' + Value)
+      else
+        WriteLn(IndentStr + '  ' + DataObject.AttributeListItem[Index].Name);
+    end;
   end;
 
 (*
@@ -40,6 +46,8 @@ begin
       WriteLn(IndentStr + '  ' + IntToStr(DataObject.DataLayoutChunk[Index]));
   end;
 *)
+
+  WriteLn(IndentStr + 'Data Size: ' + IntToStr(DataObject.Data.Size));
 
   // write data objects
   if DataObject.DataObjectCount > 0 then
@@ -76,16 +84,35 @@ begin
   finally
     HdfFile.Free;
   end;
+end;
 
-  {$IFDEF DEBUG}
-  ReadLn;
-  {$ENDIF}
+procedure ReadHdfFiles;
+var
+  SR: TSearchRec;
+  FileName: TFileName;
+begin
+  if FindFirst('*.sofa', faAnyFile, SR) = 0 then
+  try
+    repeat
+      FileName := SR.Name;
+      WriteLn('Process file ' + ExtractFileName(FileName));
+      ReadHdfFile(FileName);
+    until FindNext(SR) <> 0;
+  finally
+    FindClose(SR);
+  end;
 end;
 
 begin
   try
     if ParamCount >= 1 then
-      ReadHdfFile(ParamStr(1));
+      ReadHdfFile(ParamStr(1))
+    else
+      ReadHdfFiles;
+
+    {$IFDEF DEBUG}
+    ReadLn;
+    {$ENDIF}
   except
     on E: Exception do
       Writeln(E.ClassName, ': ', E.Message);

@@ -947,7 +947,6 @@ begin
 
       DecompressionStream := TDecompressionStream.Create(Stream);
       try
-        Assert(DataObject.Data.Size = 0);
         DataObject.Data.CopyFrom(DecompressionStream, Elements * ElementSize);
       finally
         DecompressionStream.Free;
