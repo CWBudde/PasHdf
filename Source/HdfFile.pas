@@ -8,6 +8,8 @@ uses
   Classes, SysUtils, Contnrs;
 
 type
+  TByteArray = array [0..MaxInt - 1] of Byte;
+  PByteArray = ^TByteArray;
   EHdfInvalidFormat = class(Exception);
 
   TStreamHelper = class helper for TStream
@@ -152,7 +154,7 @@ type
   private
     FDataTypes: TObjectList;
   public
-    constructor Create(DatatypeMessage: THdfMessageDataType); virtual;
+    constructor Create(DatatypeMessage: THdfMessageDataType); override;
     procedure LoadFromStream(Stream: TStream); override;
   end;
 
@@ -223,11 +225,14 @@ type
     FStream: TMemoryStream;
     function GetValueAsString: UTF8String;
     procedure SetValueAsString(const Value: UTF8String);
+    function GetValueAsInteger: Integer;
+    procedure SetValueAsInteger(const Value: Integer);
   public
     constructor Create(Name: UTF8String);
 
     property Name: UTF8String read FName;
     property ValueAsString: UTF8String read GetValueAsString write SetValueAsString;
+    property ValueAsInteger: Integer read GetValueAsInteger write SetValueAsInteger;
   end;
 
   THdfMessageAttribute = class(THdfDataObjectMessage)
@@ -414,6 +419,9 @@ type
     procedure LoadFromStream(Stream: TStream);
     procedure SaveToStream(Stream: TStream);
 
+    function HasAttribute(Name: string): Boolean;
+    function GetAttribute(Name: string): string;
+
     property Name: UTF8String read FName;
     property Data: TMemoryStream read FData;
     property DataType: THdfMessageDataType read FDataType;
@@ -442,6 +450,9 @@ type
 
     procedure LoadFromFile(Filename: TFileName);
     procedure SaveToFile(Filename: TFileName);
+
+    function HasAttribute(Name: string): Boolean;
+    function GetAttribute(Name: string): string;
 
     property SuperBlock: THdfSuperBlock read FSuperBlock;
     property DataObject: THdfDataObject read FDataObject;
@@ -708,7 +719,7 @@ end;
 
 constructor THdfDataTypeCompound.Create(DatatypeMessage: THdfMessageDataType);
 begin
-  inherited Create(DatatypeMessage);
+  inherited;
 
   FDataTypes := TObjectList.Create;
 end;
@@ -737,7 +748,7 @@ end;
 constructor THdfDataTypeVariableLength.Create(
   DatatypeMessage: THdfMessageDataType);
 begin
-  inherited;
+  inherited Create(DatatypeMessage);
 
   FDataType := THdfMessageDataType.Create(FDataTypeMessage.Superblock, FDataTypeMessage.DataObject);
 end;
@@ -824,7 +835,6 @@ end;
 procedure THdfMessageDataLayout.LoadFromStream(Stream: TStream);
 var
   Index: Integer;
-  Temp: Integer;
   StreamPos: Int64;
   Size: Int64;
 begin
@@ -892,12 +902,16 @@ var
   EntriesUsed: Word;
   Key, AddressLeftSibling, AddressRightSibling: Int64;
   ElementIndex, DimensionIndex, Elements: Integer;
-  ElementSize, ChunkSize, FilterMask: Cardinal;
-  Start: array of Cardinal;
-  BreakCondition: Cardinal;
+  ElementSize, ChunkSize, FilterMask: Integer;
+  Start: array of Int64;
+  BreakCondition: Int64;
   ChildPointer, StreamPos: Int64;
   DecompressionStream: TDecompressionStream;
+  Input, Output: PByteArray;
+  ByteIndex: Integer;
   CheckSum: Integer;
+  b, x, y, z, sx, sy, sz, dy, dz, OutPos: Integer;
+  Val: Byte;
 begin
   if DataObject.DataSpace.Dimensionality > 3 then
     raise EHdfInvalidFormat.Create('Error reading dimensions');
@@ -920,39 +934,99 @@ begin
 
   ElementSize := FDataObject.DatalayoutChunk[FDataObject.DataSpace.Dimensionality];
 
-  for ElementIndex := 0 to 2 * EntriesUsed - 1 do
-  begin
-    if NodeType = 0 then
-      Stream.ReadExcept(Key, Superblock.LengthsSize, 'Error reading keys')
-    else
+  GetMem(Output, Size);
+  try
+    for ElementIndex := 0 to 2 * EntriesUsed - 1 do
     begin
-      Stream.ReadExcept(ChunkSize, 4, 'Error reading chunk size');
-      Stream.ReadExcept(FilterMask, 4, 'Error reading filter mask');
-      if FilterMask <> 0 then
-        raise Exception.Create('All filters must be enabled');
+      if NodeType = 0 then
+        Stream.ReadExcept(Key, Superblock.LengthsSize, 'Error reading keys')
+      else
+      begin
+        Stream.ReadExcept(ChunkSize, 4, 'Error reading chunk size');
+        Stream.ReadExcept(FilterMask, 4, 'Error reading filter mask');
+        if FilterMask <> 0 then
+          raise Exception.Create('All filters must be enabled');
 
-      SetLength(Start, DataObject.DataSpace.Dimensionality);
-      for DimensionIndex := 0 to DataObject.DataSpace.Dimensionality - 1 do
-        Stream.ReadExcept(Start[DimensionIndex], 8, 'Error reading start');
+        SetLength(Start, DataObject.DataSpace.Dimensionality);
+        for DimensionIndex := 0 to DataObject.DataSpace.Dimensionality - 1 do
+          Stream.ReadExcept(Start[DimensionIndex], 8, 'Error reading start');
 
-      Stream.ReadExcept(BreakCondition, 8, 'Error reading break condition');
-      if BreakCondition <> 0 then
-        Break;
+        Stream.ReadExcept(BreakCondition, 8, 'Error reading break condition');
+        if BreakCondition <> 0 then
+          Break;
 
-      Stream.ReadExcept(ChildPointer, Superblock.OffsetSize, 'Error reading child pointer');
+        Stream.ReadExcept(ChildPointer, Superblock.OffsetSize, 'Error reading child pointer');
 
-      // read data
-      StreamPos := Stream.Position;
-      Stream.Position := ChildPointer;
+        // read data
+        StreamPos := Stream.Position;
+        Stream.Position := ChildPointer;
 
-      DecompressionStream := TDecompressionStream.Create(Stream);
-      try
-        DataObject.Data.CopyFrom(DecompressionStream, Elements * ElementSize);
-      finally
-        DecompressionStream.Free;
+        GetMem(Input, Elements * ElementSize);
+        try
+          DecompressionStream := TDecompressionStream.Create(Stream);
+          try
+            DecompressionStream.Read(Input^[0], Elements * ElementSize);
+          finally
+            DecompressionStream.Free;
+          end;
+
+          case DataObject.DataSpace.Dimensionality of
+            1:
+              begin
+                sx := DataObject.DataSpace.FDimensionSize[0];
+                for ByteIndex := 0 to Elements * ElementSize - 1 do
+                begin
+                  b := ByteIndex div Elements;
+                  x := ByteIndex mod Elements + Start[0];
+                  if (x < sx) then
+                    Output^[x * ElementSize + b] := Input^[ByteIndex];
+                end;
+              end;
+            2:
+              begin
+                sx := DataObject.DataSpace.FDimensionSize[0];
+                sy := DataObject.DataSpace.FDimensionSize[1];
+                dy := DataObject.DataLayoutChunk[1];
+                for ByteIndex := 0 to Elements * ElementSize - 1 do
+                begin
+                  b := ByteIndex div Elements;
+                  x := ByteIndex mod Elements;
+                  y := x mod dy + Start[1];
+                  x := x div dy + Start[0];
+                  if (y < sy) and (x < sx) then
+                    Output^[(x * sy + y) * ElementSize + b] := Input^[ByteIndex];
+                end;
+              end;
+            3:
+              begin
+                sx := DataObject.DataSpace.FDimensionSize[0];
+                sy := DataObject.DataSpace.FDimensionSize[1];
+                sz := DataObject.DataSpace.FDimensionSize[2];
+                dy := DataObject.DataLayoutChunk[1];
+                dz := DataObject.DataLayoutChunk[2];
+                for ByteIndex := 0 to Elements * ElementSize - 1 do
+                begin
+                  b := ByteIndex div Elements;
+                  x := ByteIndex mod Elements;
+                  z := (x mod dz) + Start[2];
+                  y := (x div dz) mod dy + Start[1];
+                  x := (x div (dy * dz)) + Start[0];
+                  if (z < sz) and (y < sy) and (x < sx) then
+                    Output^[(x * sz * sy + y * sz + z) * ElementSize + b] := Input^[ByteIndex];
+                end;
+              end;
+          end;
+        finally
+          FreeMem(Input);
+        end;
+
+        Stream.Position := StreamPos;
       end;
-      Stream.Position := StreamPos;
     end;
+
+    DataObject.Data.Write(Output^[0], Size);
+  finally
+    FreeMem(Output);
   end;
 
   Stream.ReadExcept(CheckSum, 4, 'Error reading checksum');
@@ -1050,7 +1124,7 @@ end;
 
 constructor THdfAttribute.Create(Name: UTF8String);
 begin
-  FName := Name;
+  FName := Trim(Name);
   FStream := TMemoryStream.Create;
 end;
 
@@ -1074,11 +1148,23 @@ begin
   end;
 end;
 
+procedure THdfAttribute.SetValueAsInteger(const Value: Integer);
+begin
+  FStream.Clear;
+  FStream.WriteData(Value);
+end;
+
+function THdfAttribute.GetValueAsInteger: Integer;
+begin
+  FStream.Position := 0;
+  FStream.ReadData(Result);
+end;
+
 procedure THdfAttribute.SetValueAsString(const Value: UTF8String);
 var
   StringStream: TStringStream;
 begin
-  StringStream := TStringStream.Create(string(Value));
+  StringStream := TStringStream.Create(Trim(string(Value)));
   try
     FStream.Clear;
     FStream.CopyFrom(StringStream, StringStream.Size);
@@ -1111,6 +1197,7 @@ begin
     7:
       begin
         Stream.ReadExcept(Value, 4, 'Error reading value');
+        Attribute.ValueAsInteger := Value;
         // TODO
       end;
     9:
@@ -1271,12 +1358,11 @@ end;
 
 procedure THdfDirectBlock.LoadFromStream(Stream: TStream);
 var
-  Size: Integer;
   OffsetSize, LengthSize: Int64;
   TypeAndVersion: Byte;
   OffsetX, LengthX: Int64;
   Temp: Int64;
-  Name, Value: AnsiString;
+  Name, Value: Utf8String;
   Attribute: THdfAttribute;
   HeapHeaderAddress: Int64;
   StreamPos: Int64;
@@ -1358,7 +1444,7 @@ begin
       
       Stream.Position := HeapHeaderAddress;
 
-      SubDataObject := THdfDataObject.Create(SuperBlock, Name);
+      SubDataObject := THdfDataObject.Create(SuperBlock, Utf8String(Name));
       SubDataObject.LoadFromStream(Stream);
 
       FDataObject.AddDataObject(SubDataObject);
@@ -1386,7 +1472,6 @@ end;
 
 procedure THdfIndirectBlock.LoadFromStream(Stream: TStream);
 var
-  Size: Integer;
   RowsCount: Integer;
   k, n: Integer;
   ChildBlockAddress: Int64;
@@ -1615,6 +1700,26 @@ begin
   Result := FDataObjects.Count;
 end;
 
+function THdfDataObject.HasAttribute(Name: string): Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  for Index := 0 to AttributeListCount - 1 do
+    if string(AttributeListItem[Index].Name) = Name then
+      Exit(True);
+end;
+
+function THdfDataObject.GetAttribute(Name: string): string;
+var
+  Index: Integer;
+begin
+  Result := '';
+  for Index := 0 to AttributeListCount - 1 do
+    if string(AttributeListItem[Index].Name) = Name then
+      Exit(AttributeListItem[Index].ValueAsString);
+end;
+
 procedure THdfDataObject.LoadFromStream(Stream: TStream);
 begin
   Stream.ReadExcept(FSignature[0], 4, 'Error reading signature');
@@ -1743,6 +1848,16 @@ begin
 
   FSuperBlock := THdfSuperBlock.Create;
   FDataObject := THdfDataObject.Create(FSuperblock);
+end;
+
+function THdfFile.GetAttribute(Name: string): string;
+begin
+  Result := FDataObject.GetAttribute(Name);
+end;
+
+function THdfFile.HasAttribute(Name: string): Boolean;
+begin
+  Result := FDataObject.HasAttribute(Name);
 end;
 
 procedure THdfFile.LoadFromFile(Filename: TFileName);
