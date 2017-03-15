@@ -140,7 +140,7 @@ type
 
   THdfDataTypeCompoundPart = class
   private
-    FName: UTF8String;
+    FName: AnsiString;
     FByteOffset: Int64;
     FSize: Int64;
     FDataType: THdfMessageDataType;
@@ -910,8 +910,7 @@ var
   Input, Output: PByteArray;
   ByteIndex: Integer;
   CheckSum: Integer;
-  b, x, y, z, sx, sy, sz, dy, dz, OutPos: Integer;
-  Val: Byte;
+  b, x, y, z, sx, sy, sz, dy, dz: Integer;
 begin
   if DataObject.DataSpace.Dimensionality > 3 then
     raise EHdfInvalidFormat.Create('Error reading dimensions');
@@ -1124,7 +1123,7 @@ end;
 
 constructor THdfAttribute.Create(Name: UTF8String);
 begin
-  FName := Trim(Name);
+  FName := Utf8String(Trim(string(Name)));
   FStream := TMemoryStream.Create;
 end;
 
@@ -1142,7 +1141,7 @@ begin
   try
     FStream.Position := 0;
     StringStream.CopyFrom(FStream, FStream.Size);
-    Result := StringStream.DataString;
+    Result := Utf8String(StringStream.DataString);
   finally
     StringStream.Free;
   end;
@@ -1362,7 +1361,7 @@ var
   TypeAndVersion: Byte;
   OffsetX, LengthX: Int64;
   Temp: Int64;
-  Name, Value: Utf8String;
+  Name, Value: AnsiString;
   Attribute: THdfAttribute;
   HeapHeaderAddress: Int64;
   StreamPos: Int64;
@@ -1717,7 +1716,7 @@ begin
   Result := '';
   for Index := 0 to AttributeListCount - 1 do
     if string(AttributeListItem[Index].Name) = Name then
-      Exit(AttributeListItem[Index].ValueAsString);
+      Exit(string(AttributeListItem[Index].ValueAsString));
 end;
 
 procedure THdfDataObject.LoadFromStream(Stream: TStream);
