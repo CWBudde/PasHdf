@@ -2,10 +2,14 @@ unit HdfFile;
 
 interface
 
+{$IFDEF FPC}
+ {$MODE DELPHI}
+{$ENDIF}
+
 {-$DEFINE IgnoreWrongPosition}
 
 uses
-  Classes, SysUtils, Contnrs;
+  {$IFDEF FPC}ZStream, {$ENDIF} Classes, SysUtils, Contnrs;
 
 type
   TByteArray = array [0..MaxInt - 1] of Byte;
@@ -404,7 +408,8 @@ type
     function GetAttributeListCount: Integer;
     function GetAttributeListItem(Index: Integer): THdfAttribute;
   protected
-    procedure ReadObjectHeaderMessages(Stream: TStream; EndOfStream: Int64);
+    procedure ReadObjectHeaderMessagesVersion1(Stream: TStream; EndOfStream: Int64);
+    procedure ReadObjectHeaderMessagesVersion2(Stream: TStream; EndOfStream: Int64);
 
     property Superblock: THdfSuperBlock read FSuperBlock;
     property AttributesHeap: THdfFractalHeap read FAttributesHeap;
@@ -476,35 +481,61 @@ end;
 { THdfSuperBlock }
 
 procedure THdfSuperBlock.LoadFromStream(Stream: TStream);
+var
+  u8: uint8;
+  u16: uint16;
+  u32: uint32;
+  i64: Int64;
+  i : integer;
 begin
+  //https://support.hdfgroup.org/HDF5/doc/H5.format.html#Superblock
   Stream.ReadExcept(FFormatSignature[0], 8, 'Error reading signature');
   if FFormatSignature <> '‰HDF'#$D#$A#$1A#$A then
     raise Exception.Create('The file is not a valid HDF');
-
   // read version
   Stream.ReadExcept(FVersion, 1, 'Error reading version');
-  if not (FVersion in [2, 3]) then
-    raise Exception.Create('Unsupported version');
-
-  // read offset & length size
-  Stream.ReadExcept(FOffsetSize, 1, 'Error reading offset size');
-  Stream.ReadExcept(FLengthsSize, 1, 'Error reading lengths size');
-
-  // read consistency flag
-  Stream.ReadExcept(FConsistencyFlag, 1, 'Error reading consistency flag');
-
-  // read base address
-  Stream.ReadExcept(FBaseAddress, FOffsetSize, 'Error reading base address');
-
-  // read superblock extension address
-  Stream.ReadExcept(FSuperBlockExtensionAddress, FOffsetSize, 'Error reading superblock extension address');
-
-  // read end of file address
-  Stream.ReadExcept(FEndOfFileAddress, FOffsetSize, 'Error reading end of file address');
-
-  // read group object header address
-  Stream.ReadExcept(FRootGroupObjectHeaderAddress, FOffsetSize, 'Error reading group object header address');
-
+  if (FVersion in [0, 1]) then begin
+    Stream.ReadExcept(u8, 1, 'Error fsver');
+    Stream.ReadExcept(u8, 1, 'Error rgver');
+    Stream.ReadExcept(u8, 1, 'Error reserved');
+    Stream.ReadExcept(u8, 1, 'Error shver');
+    Stream.ReadExcept(FOffsetSize, 1, 'Error reading offset size');
+    Stream.ReadExcept(FLengthsSize, 1, 'Error reading lengths size');
+    Stream.ReadExcept(u8, 1, 'Error reserved');
+    Stream.ReadExcept(u16, 2, 'Error gln_k');
+    Stream.ReadExcept(u16, 2, 'Error gin_k');
+    Stream.ReadExcept(u32, 4, 'Error reading consistency flag');
+    FConsistencyFlag := u32;
+    if (FVersion = 1) then begin
+      Stream.ReadExcept(u16, 2, 'Error isin_k');
+      Stream.ReadExcept(u16, 2, 'Error reserved');
+    end;
+    Stream.ReadExcept(FBaseAddress, FOffsetSize, 'Error reading base address');
+    Stream.ReadExcept(i64, FOffsetSize, 'Error reading gfsi_addr');
+    Stream.ReadExcept(FEndOfFileAddress, FOffsetSize, 'Error reading end of file address');
+    Stream.ReadExcept(i64, FOffsetSize, 'Error reading dib_addr');
+    Stream.ReadExcept(i64, FOffsetSize, 'Error reading root_ln_offs');
+    Stream.ReadExcept(FRootGroupObjectHeaderAddress, FOffsetSize, 'Error reading group object header address');
+    for i := 1 to 6 do
+        Stream.ReadExcept(u32, 4, 'Error reading old header');
+  end else if (FVersion in [2, 3]) then begin
+    // read offset & length size
+    Stream.ReadExcept(FOffsetSize, 1, 'Error reading offset size');
+    Stream.ReadExcept(FLengthsSize, 1, 'Error reading lengths size');
+    // read consistency flag
+    Stream.ReadExcept(FConsistencyFlag, 1, 'Error reading consistency flag');
+    // read base address
+    Stream.ReadExcept(FBaseAddress, FOffsetSize, 'Error reading base address');
+    // read superblock extension address
+    Stream.ReadExcept(FSuperBlockExtensionAddress, FOffsetSize, 'Error reading superblock extension address');
+    // read end of file address
+    Stream.ReadExcept(FEndOfFileAddress, FOffsetSize, 'Error reading end of file address');
+    // read group object header address
+    Stream.ReadExcept(FRootGroupObjectHeaderAddress, FOffsetSize, 'Error reading group object header address');
+    // read checksum
+    Stream.ReadExcept(FChecksum, 4, 'Error reading checksum');
+  end else
+      raise Exception.Create('Unsupported version '+ inttostr(FVersion));
   if FBaseAddress <> 0 then
     raise Exception.Create('The base address should be zero');
   if FEndOfFileAddress <> Stream.Size then
@@ -513,7 +544,7 @@ begin
   // read checksum
   Stream.ReadExcept(FChecksum, 4, 'Error reading checksum');
 
-  // read checksum
+  // seek beginning
   if Stream.Seek(FRootGroupObjectHeaderAddress, soFromBeginning) <> FRootGroupObjectHeaderAddress then
     raise Exception.Create('Error seeking first object');
 end;
@@ -1137,7 +1168,7 @@ begin
     Exit;
   end;
 
-  StringStream := TStringStream.Create;
+  StringStream := TStringStream.Create('');
   try
     FStream.Position := 0;
     StringStream.CopyFrom(FStream, FStream.Size);
@@ -1150,13 +1181,22 @@ end;
 procedure THdfAttribute.SetValueAsInteger(const Value: Integer);
 begin
   FStream.Clear;
+  {$IFDEF FPC}
+  FStream.Write(Value,1);
+  {$ELSE}
   FStream.WriteData(Value);
+  {$ENDIF}
 end;
 
 function THdfAttribute.GetValueAsInteger: Integer;
 begin
   FStream.Position := 0;
+
+  {$IFDEF FPC}
+  FStream.Read(Result,1);
+  {$ELSE}
   FStream.ReadData(Result);
+  {$ENDIF}
 end;
 
 procedure THdfAttribute.SetValueAsString(const Value: UTF8String);
@@ -1282,7 +1322,7 @@ begin
   if Signature <> 'OCHK' then
     raise Exception.CreateFmt('Wrong signature (%s)', [string(Signature)]);
 
-  DataObject.ReadObjectHeaderMessages(Stream, FOffset + FLength);
+  DataObject.ReadObjectHeaderMessagesVersion2(Stream, FOffset + FLength);
 
   Stream.Position := StreamPos;
 end;
@@ -1406,7 +1446,7 @@ begin
       Stream.ReadExcept(Temp, 6, 'Error reading unknown value');
       if Temp = $20200 then
       begin
-          
+
       end
       else if Temp = $20000 then
       begin
@@ -1414,7 +1454,7 @@ begin
         Stream.ReadExcept(Value[1], LengthX, 'Error reading value');
       end
       else if Temp = $20000020000 then
-      begin 
+      begin
         Value := '';
       end;
 
@@ -1431,7 +1471,7 @@ begin
       if Temp <> 0 then
         raise Exception.Create('FHDB type 1 unsupported values');
 
-      // read name  
+      // read name
       Stream.Read(LengthX, 1);
       SetLength(Name, LengthX);
       Stream.ReadExcept(Name[1], LengthX, 'Error reading name');
@@ -1440,7 +1480,7 @@ begin
       Stream.ReadExcept(HeapHeaderAddress, SuperBlock.OffsetSize, 'Error reading heap header address');
 
       StreamPos := Stream.Position;
-      
+
       Stream.Position := HeapHeaderAddress;
 
       SubDataObject := THdfDataObject.Create(SuperBlock, Utf8String(Name));
@@ -1720,52 +1760,80 @@ begin
 end;
 
 procedure THdfDataObject.LoadFromStream(Stream: TStream);
+var
+  u8: Byte;
+  TotalHeaderMessageCount, u16: Word;
+  ObjectReferenceCount,
+  ObjectHeaderSize, u32: Cardinal;
 begin
-  Stream.ReadExcept(FSignature[0], 4, 'Error reading signature');
-  if FSignature <> 'OHDR' then
-    raise Exception.CreateFmt('Wrong signature (%s)', [string(FSignature)]);
+  //https://support.hdfgroup.org/HDF5/doc/H5.format.html#ObjectHeader
+  case Self.FSuperBlock.FVersion of
+    0, 1:
+      begin
+        // Read a v1 object header
+        Stream.ReadExcept(FVersion, 1, 'Error reading version');
+        if FVersion <> 1 then
+          raise Exception.Create('Invalid ObjectHeader version');
+        Stream.ReadExcept(u8, 1, 'Error reading reserved');
 
-  // read version
-  Stream.ReadExcept(FVersion, 1, 'Error reading version');
-  if FVersion <> 2 then
-    raise Exception.Create('Invalid verion');
+        Stream.ReadExcept(TotalHeaderMessageCount, 2, 'Error reading Total Number of Header Messages');
 
-  Stream.ReadExcept(FFlags, 1, 'Error reading flags');
+        Stream.ReadExcept(ObjectReferenceCount, 4, 'Error reading Object Reference Count');
+        Stream.ReadExcept(ObjectHeaderSize, 4, 'Error reading  Object Header Size');
 
-  // eventually read time stamps
-  if (FFlags and (1 shl 5)) <> 0 then
-  begin
-    Stream.ReadExcept(FAccessTime, 4, 'Error reading access time');
-    Stream.ReadExcept(FModificationTime, 4, 'Error reading modification time');
-    Stream.ReadExcept(FChangeTime, 4, 'Error reading change time');
-    Stream.ReadExcept(FBirthTime, 4, 'Error reading birth time');
-  end;
+        // read object header messages (version 1)
+        ReadObjectHeaderMessagesVersion1(Stream, Stream.Position + ObjectHeaderSize);
+      end;
+    2:
+      begin
+        Stream.ReadExcept(FSignature[0], 4, 'Error reading signature');
+        if FSignature <> 'OHDR' then
+          raise Exception.CreateFmt('Wrong signature (%s)', [string(FSignature)]);
 
-  // eventually skip number of attributes
-  if (FFlags and (1 shl 4)) <> 0 then
-  begin
-    Stream.ReadExcept(FMaximumCompact, 2, 'Error reading maximum number of compact attributes');
-    Stream.ReadExcept(FMinimumDense, 2, 'Error reading minimum number of dense attributes');
-  end;
+        // read version
+        Stream.ReadExcept(FVersion, 1, 'Error reading version');
+        if FVersion <> 2 then
+          raise Exception.Create('Invalid verion');
 
-  Stream.ReadExcept(FChunkSize, 1 shl (FFlags and 3), 'Error reading chunk size');
+        Stream.ReadExcept(FFlags, 1, 'Error reading flags');
 
-  ReadObjectHeaderMessages(Stream, Stream.Position + FChunkSize);
+        // eventually read time stamps
+        if (FFlags and (1 shl 5)) <> 0 then
+        begin
+          Stream.ReadExcept(FAccessTime, 4, 'Error reading access time');
+          Stream.ReadExcept(FModificationTime, 4, 'Error reading modification time');
+          Stream.ReadExcept(FChangeTime, 4, 'Error reading change time');
+          Stream.ReadExcept(FBirthTime, 4, 'Error reading birth time');
+        end;
 
-  // parse message attribute info
-  if (AttributeInfo.FractalHeapAddress > 0) and
-     (AttributeInfo.FractalHeapAddress < FSuperblock.EndOfFileAddress) then
-  begin
-    Stream.Position := AttributeInfo.FractalHeapAddress;
-    FAttributesHeap.LoadFromStream(Stream);
-  end;
+        // eventually skip number of attributes
+        if (FFlags and (1 shl 4)) <> 0 then
+        begin
+          Stream.ReadExcept(FMaximumCompact, 2, 'Error reading maximum number of compact attributes');
+          Stream.ReadExcept(FMinimumDense, 2, 'Error reading minimum number of dense attributes');
+        end;
 
-  // parse message link info
-  if (LinkInfo.FractalHeapAddress > 0) and
-     (LinkInfo.FractalHeapAddress < FSuperblock.EndOfFileAddress) then
-  begin
-    Stream.Position := LinkInfo.FractalHeapAddress;
-    FObjectsHeap.LoadFromStream(Stream);
+        Stream.ReadExcept(FChunkSize, 1 shl (FFlags and 3), 'Error reading chunk size');
+
+        // read object header messages (version 2)
+        ReadObjectHeaderMessagesVersion2(Stream, Stream.Position + FChunkSize);
+
+        // parse message attribute info
+        if (AttributeInfo.FractalHeapAddress > 0) and
+           (AttributeInfo.FractalHeapAddress < FSuperblock.EndOfFileAddress) then
+        begin
+          Stream.Position := AttributeInfo.FractalHeapAddress;
+          FAttributesHeap.LoadFromStream(Stream);
+        end;
+
+        // parse message link info
+        if (LinkInfo.FractalHeapAddress > 0) and
+           (LinkInfo.FractalHeapAddress < FSuperblock.EndOfFileAddress) then
+        begin
+          Stream.Position := LinkInfo.FractalHeapAddress;
+          FObjectsHeap.LoadFromStream(Stream);
+        end;
+      end;
   end;
 end;
 
@@ -1774,7 +1842,72 @@ begin
   raise Exception.Create('Not yet implemented');
 end;
 
-procedure THdfDataObject.ReadObjectHeaderMessages(Stream: TStream; EndOfStream: Int64);
+procedure THdfDataObject.ReadObjectHeaderMessagesVersion1(Stream: TStream; EndOfStream: Int64);
+var
+  MessageType: Word;
+  MessageSize: Word;
+  MessageFlags, u8: Byte;
+  EndPos: Int64;
+  DataObjectMessage: THdfDataObjectMessage;
+begin
+  while Stream.Position < EndOfStream - 4 do
+  begin
+    Stream.ReadExcept(MessageType, 2, 'Error reading message type');
+    Stream.ReadExcept(MessageSize, 2, 'Error reading message size');
+    Stream.ReadExcept(MessageFlags, 1, 'Error reading message flags');
+
+(*
+    if (MessageFlags and not 5) <> 0 then
+      raise Exception.Create('Unsupported message flag');
+*)
+
+    Stream.ReadExcept(u8, 1, 'Error reading message reserved 1');
+    Stream.ReadExcept(u8, 1, 'Error reading message reserved 2');
+    Stream.ReadExcept(u8, 1, 'Error reading message reserved 3');
+    EndPos := Stream.Position + MessageSize;
+
+    DataObjectMessage := nil;
+    case MessageType of
+      0:
+        Stream.Seek(MessageSize, soFromCurrent);
+      1:
+        DataObjectMessage := FDataSpace;
+      2:
+        DataObjectMessage := FLinkInfo;
+      3:
+        DataObjectMessage := FDataType;
+      5:
+        DataObjectMessage := THdfMessageDataFill.Create(FSuperBlock, Self);
+      8:
+        DataObjectMessage := THdfMessageDataLayout.Create(FSuperBlock, Self);
+      10:
+        DataObjectMessage := FGroupInfo;
+      11:
+        DataObjectMessage := THdfMessageFilterPipeline.Create(FSuperBlock, Self);
+      12:
+        DataObjectMessage := THdfMessageAttribute.Create(FSuperBlock, Self);
+      16:
+        DataObjectMessage := THdfMessageHeaderContinuation.Create(FSuperBlock, Self);
+      21:
+        DataObjectMessage := FAttributeInfo;
+      else
+        raise Exception.CreateFmt('Unknown header message (%d)', [MessageType]);
+    end;
+
+    // now eventally load data object message
+    if Assigned(DataObjectMessage) then
+      DataObjectMessage.LoadFromStream(Stream);
+
+    {$IFDEF IgnoreWrongPosition}
+    Stream.Position := EndPos;
+    {$ELSE}
+    if Stream.Position <> EndPos then
+      Assert(Stream.Position = EndPos);
+    {$ENDIF}
+  end;
+end;
+
+procedure THdfDataObject.ReadObjectHeaderMessagesVersion2(Stream: TStream; EndOfStream: Int64);
 var
   MessageType: Byte;
   MessageSize: Word;
